@@ -16,6 +16,9 @@ const int BACKLASH_X_PULSES = 1;
 const int BACKLASH_Y_PULSES = 1; 
 const int BACKLASH_Z_PULSES = 1;
 
+// --- TACHO SETTING ---
+const int PULSES_PER_ROTATION = 6;
+const int MAX_RPM = 12000; // Safety cap - lathe max around 10k RPM
 
 
 
@@ -32,9 +35,10 @@ public:
   EncoderAxis(int pinA, int pinB, int backlashPulses) 
     : pinA(pinA), pinB(pinB), backlashPulses(backlashPulses) {}
   
-  void begin() {
+  void begin(void (*isr)()) {
     pinMode(pinA, INPUT_PULLUP);
     pinMode(pinB, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(pinA), isr, CHANGE);
   }
   
   // Process encoder pulse - called from ISR
@@ -58,16 +62,52 @@ public:
   long getCount() const { return count; }
 };
 
+// --- TACHO SENSOR CLASS ---
+class TachoSensor {
+public:
+  int pin;
+  int pulsesPerRotation;
+  int maxRPM;
+  volatile unsigned long pulseCount = 0;
+  
+  TachoSensor(int pin, int pulsesPerRotation, int maxRPM)
+    : pin(pin), pulsesPerRotation(pulsesPerRotation), maxRPM(maxRPM) {}
+  
+  void begin(void (*isr)()) {
+    pinMode(pin, INPUT_PULLUP);
+    attachInterrupt(digitalPinToInterrupt(pin), isr, RISING);
+  }
+  
+  inline void handlePulse() {
+    pulseCount++;
+  }
+  
+  int calculateRPM(unsigned long intervalMs) {
+    // Read and reset pulse counter
+    unsigned long count = pulseCount;
+    pulseCount = 0;
+    
+    // Calculate RPM: (pulses * 60 * 1000) / (interval_ms * pulses_per_rotation)
+    unsigned long calculated_rpm = (count * 60 * 1000) / (intervalMs * pulsesPerRotation);
+    
+    // Apply sanity check - cap at maximum expected RPM
+    if (calculated_rpm <= maxRPM) {
+      return calculated_rpm;
+    } else {
+      return 0; // Invalid reading, probably noise
+    }
+  }
+};
+
+// --- ENCODER INSTANCES ---
 EncoderAxis axisX(ENCODER_X_A, ENCODER_X_B, BACKLASH_X_PULSES);
 EncoderAxis axisY(ENCODER_Y_A, ENCODER_Y_B, BACKLASH_Y_PULSES);
 EncoderAxis axisZ(ENCODER_Z_A, ENCODER_Z_B, BACKLASH_Z_PULSES);
 
-BluetoothSerial SerialBT;
+// --- TACHO SENSOR ---
+TachoSensor tacho(ENCODER_TACHO, PULSES_PER_ROTATION, MAX_RPM);
 
-// Tacho sensor outputs 6 pulses per rotation
-const int PULSES_PER_ROTATION = 6;
-const int MAX_RPM = 12000; // Safety cap - lathe max around 10k RPM
-volatile unsigned long tacho_pulse_count = 0; // Count pulses in current interval
+BluetoothSerial SerialBT;
 
 // --- TIMER VARIABLES ---
 unsigned long lastSendTime = 0;
@@ -99,7 +139,7 @@ void IRAM_ATTR isrZ() {
 }
 
 void IRAM_ATTR isrTacho() {
-  tacho_pulse_count++;
+  tacho.handlePulse();
 }
 
 void setup() {
@@ -108,15 +148,10 @@ void setup() {
   SerialBT.begin("Sherline_DRO"); 
   Serial.println("Bluetooth DRO Controller: Sherline_DRO");
   
-  axisX.begin();
-  axisY.begin();
-  axisZ.begin();
-  pinMode(ENCODER_TACHO, INPUT_PULLUP);
-  
-  attachInterrupt(digitalPinToInterrupt(ENCODER_X_A), isrX, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_Y_A), isrY, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_Z_A), isrZ, CHANGE);
-  attachInterrupt(digitalPinToInterrupt(ENCODER_TACHO), isrTacho, RISING);
+  axisX.begin(isrX);
+  axisY.begin(isrY);
+  axisZ.begin(isrZ);
+  tacho.begin(isrTacho);
 }
 
 void loop() {
@@ -128,24 +163,7 @@ void loop() {
   
   // Update RPM calculation at 2Hz (every 500ms)
   if (millis() - lastRpmUpdateTime >= rpmUpdateInterval) {
-    // Read and reset pulse counter
-    unsigned long pulse_count = tacho_pulse_count;
-    tacho_pulse_count = 0;
-    
-    // Calculate RPM from pulse count over time interval
-    // pulses_per_second = pulse_count / (interval_ms / 1000)
-    // rotations_per_second = pulses_per_second / PULSES_PER_ROTATION
-    // RPM = rotations_per_second * 60
-    // Simplified: RPM = (pulse_count * 60 * 1000) / (interval_ms * PULSES_PER_ROTATION)
-    unsigned long calculated_rpm = (pulse_count * 60 * 1000) / (rpmUpdateInterval * PULSES_PER_ROTATION);
-    
-    // Apply sanity check - cap at maximum expected RPM
-    if (calculated_rpm <= MAX_RPM) {
-      current_rpm = calculated_rpm;
-    } else {
-      current_rpm = 0; // Invalid reading, probably noise
-    }
-    
+    current_rpm = tacho.calculateRPM(rpmUpdateInterval);
     lastRpmUpdateTime = millis();
   }
 
@@ -158,9 +176,10 @@ void loop() {
     SerialBT.print("z");SerialBT.print(snap_out_z);SerialBT.println(";");
     SerialBT.print("t");SerialBT.print(current_rpm);SerialBT.println(";");
     
-    Serial.print("x");Serial.print(snap_out_x);Serial.println(";");
-    Serial.print("y");Serial.print(snap_out_y);Serial.println(";");
-    Serial.print("z");Serial.print(snap_out_z);Serial.println(";");
-    Serial.print("t");Serial.print(current_rpm);Serial.println(";");
+    //Uncomment the following if you want to see the output in Serial Monitor
+    // Serial.print("x");Serial.print(snap_out_x);Serial.println(";");
+    // Serial.print("y");Serial.print(snap_out_y);Serial.println(";");
+    // Serial.print("z");Serial.print(snap_out_z);Serial.println(";");
+    // Serial.print("t");Serial.print(current_rpm);Serial.println(";");
   }
 }
