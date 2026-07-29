@@ -2,17 +2,13 @@
 
 
 // --- PIN ASSIGNMENTS ---
-// Adjust these to match your physical ESP32 wiring
 #define ENCODER_X_A  16
 #define ENCODER_X_B  17
-
 #define ENCODER_Z_A  18
 #define ENCODER_Z_B  19
-
 #define ENCODER_TACHO  22
 
 
-// --- BLUETOOTH CONFIG ---
 BluetoothSerial SerialBT;
 
 // --- BACKLASH SETTINGS (Modify these based on your physical measurements!) ---
@@ -26,12 +22,6 @@ BluetoothSerial SerialBT;
 volatile long raw_x_count = 0;
 volatile long raw_z_count = 0;
 volatile long raw_tacho_count = 0;
-
-// Debounce timing - 250 interrupts/sec = 4ms minimum between interrupts (4000 microseconds)
-volatile unsigned long last_x_micros = 0;
-volatile unsigned long last_z_micros = 0;
-volatile unsigned long last_tacho_micros = 0;
-const unsigned long DEBOUNCE_MICROS = 4000; // 4ms = 250 Hz max
 
 // Track the physical direction of rotation (true = forward, false = backward)
 // volatile bool dir_x = true;
@@ -54,20 +44,14 @@ const unsigned long sendInterval = 40; // 40ms = ~25Hz refresh rate
 // --- INTERRUPT SERVICE ROUTINES (ISRs) ---
 // High-speed, lightweight interrupt functions to track A/B quadrature transitions
 void IRAM_ATTR isrX() {
-
   bool pinA = digitalRead(ENCODER_X_A);
   bool pinB = digitalRead(ENCODER_X_B);
   bool current_dir = (pinA == pinB);
 
-  unsigned long current_micros = micros();
-  if (current_micros - last_x_micros >= DEBOUNCE_MICROS) {
-    if (current_dir)
-      raw_x_count++;
-    else
-      raw_x_count--;
-  
-    last_x_micros = current_micros;
-  }
+  if (current_dir)
+    raw_x_count++;
+  else
+    raw_x_count--;
   
   // if (current_dir != dir_x) {
   //   // Direction change detected! Record position and trigger backlash absorption
@@ -78,20 +62,14 @@ void IRAM_ATTR isrX() {
 }
 
 void IRAM_ATTR isrZ() {
-  unsigned long current_micros = micros();
-  if (current_micros - last_z_micros >= DEBOUNCE_MICROS) {
-    bool pinA = digitalRead(ENCODER_Z_A);
-    bool pinB = digitalRead(ENCODER_Z_B);
-    bool current_dir = (pinA == pinB);
-  
-    if (current_dir)
-      raw_z_count++;
-    else
-      raw_z_count--;
+  bool pinA = digitalRead(ENCODER_Z_A);
+  bool pinB = digitalRead(ENCODER_Z_B);
+  bool current_dir = (pinA == pinB);
 
-    last_z_micros = current_micros;
-  }
-
+  if (current_dir)
+    raw_z_count++;
+  else
+    raw_z_count--;
   
   // if (current_dir != dir_z) {
   //   dir_z = current_dir;
@@ -101,28 +79,21 @@ void IRAM_ATTR isrZ() {
 }
 
 void IRAM_ATTR isrTacho() {
-  unsigned long current_micros = micros();
-  if (current_micros - last_tacho_micros >= DEBOUNCE_MICROS) {
-    raw_tacho_count++;
-    last_tacho_micros = current_micros;
-  }
+  raw_tacho_count++;
 }
 
 void setup() {
   Serial.begin(115200);
   
-  // Initialize Bluetooth Classic with the broadcast name TouchDRO looks for
   SerialBT.begin("Sherline_DRO"); 
   Serial.println("Bluetooth DRO Controller: Sherline_DRO");
   
-  // Set pins as INPUT with internal pull-ups (highly recommended for optical sensors)
   pinMode(ENCODER_X_A, INPUT_PULLUP);
   pinMode(ENCODER_X_B, INPUT_PULLUP);
   pinMode(ENCODER_Z_A, INPUT_PULLUP);
   pinMode(ENCODER_Z_B, INPUT_PULLUP);
   pinMode(ENCODER_TACHO, INPUT_PULLUP);
   
-  // Attach interrupts to trigger on both rising and falling edges of Channel A
   attachInterrupt(digitalPinToInterrupt(ENCODER_X_A), isrX, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENCODER_Z_A), isrZ, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENCODER_TACHO), isrTacho, RISING);
@@ -185,7 +156,7 @@ void loop() {
     Serial.print("x");Serial.print(snap_raw_x);Serial.println(";");
     Serial.print("z");Serial.print(snap_raw_z);Serial.println(";");
     Serial.print("t");Serial.print(snap_raw_tacho);Serial.println(";");
-}
+  }
 
 
 
