@@ -21,7 +21,11 @@ BluetoothSerial SerialBT;
 // Must be volatile because they are modified inside Interrupt Service Routines (ISRs)
 volatile long raw_x_count = 0;
 volatile long raw_z_count = 0;
-volatile long raw_tacho_count = 0;
+
+// Tacho sensor outputs 6 pulses per rotation
+const int PULSES_PER_ROTATION = 6;
+const int MAX_RPM = 12000; // Safety cap - lathe max around 10k RPM
+volatile unsigned long tacho_pulse_count = 0; // Count pulses in current interval
 
 // Track the physical direction of rotation (true = forward, false = backward)
 // volatile bool dir_x = true;
@@ -37,9 +41,12 @@ volatile long raw_tacho_count = 0;
 // bool backlash_active_x = false;
 // bool backlash_active_z = false;
 
-// --- TIMER VARIABLE ---
+// --- TIMER VARIABLES ---
 unsigned long lastSendTime = 0;
-const unsigned long sendInterval = 40; // 40ms = ~25Hz refresh rate
+const unsigned long sendInterval = 40; // 40ms = ~25Hz refresh rate for TouchDRO
+unsigned long lastRpmUpdateTime = 0;
+const unsigned long rpmUpdateInterval = 500; // 500ms = 2Hz RPM update rate
+int current_rpm = 0; // Last calculated RPM value
 
 // --- INTERRUPT SERVICE ROUTINES (ISRs) ---
 // High-speed, lightweight interrupt functions to track A/B quadrature transitions
@@ -79,7 +86,7 @@ void IRAM_ATTR isrZ() {
 }
 
 void IRAM_ATTR isrTacho() {
-  raw_tacho_count++;
+  tacho_pulse_count++;
 }
 
 void setup() {
@@ -101,12 +108,32 @@ void setup() {
 
 void loop() {
 
-  // 1. Process Backlash Logic outside of ISR to keep interrupts blazing fast
-  // noInterrupts(); // Temporarily pause interrupts to safely copy volatile variables
+  // Copy volatile variables (atomic on 32-bit ESP32)
   long snap_raw_x = raw_x_count;
   long snap_raw_z = raw_z_count;
-  long snap_raw_tacho = raw_tacho_count;
-  // interrupts();   // Resume interrupts
+  
+  // Update RPM calculation at 2Hz (every 500ms)
+  if (millis() - lastRpmUpdateTime >= rpmUpdateInterval) {
+    // Read and reset pulse counter atomically using exchange
+    unsigned long pulse_count = tacho_pulse_count;
+    tacho_pulse_count = 0;
+    
+    // Calculate RPM from pulse count over time interval
+    // pulses_per_second = pulse_count / (interval_ms / 1000)
+    // rotations_per_second = pulses_per_second / PULSES_PER_ROTATION
+    // RPM = rotations_per_second * 60
+    // Simplified: RPM = (pulse_count * 60 * 1000) / (interval_ms * PULSES_PER_ROTATION)
+    unsigned long calculated_rpm = (pulse_count * 60 * 1000) / (rpmUpdateInterval * PULSES_PER_ROTATION);
+    
+    // Apply sanity check - cap at maximum expected RPM
+    if (calculated_rpm <= MAX_RPM) {
+      current_rpm = calculated_rpm;
+    } else {
+      current_rpm = 0; // Invalid reading, probably noise
+    }
+    
+    lastRpmUpdateTime = millis();
+  }
   
   // --- X-AXIS BACKLASH FILTER ---
   // if (backlash_active_x) {
@@ -145,21 +172,17 @@ void loop() {
   //   prev_raw_z = snap_raw_z;
   // }
 
-  // 2. Stream formatted data block to TouchDRO over Bluetooth at 25 Hz
+  // Stream formatted data block to TouchDRO over Bluetooth at 25 Hz
   if (millis() - lastSendTime >= sendInterval) {
     lastSendTime = millis();
     
     SerialBT.print("x");SerialBT.print(snap_raw_x);SerialBT.println(";");
     SerialBT.print("z");SerialBT.print(snap_raw_z);SerialBT.println(";");
-    SerialBT.print("t");SerialBT.print(snap_raw_tacho);SerialBT.println(";");
+    SerialBT.print("t");SerialBT.print(current_rpm);SerialBT.println(";");
     
     Serial.print("x");Serial.print(snap_raw_x);Serial.println(";");
     Serial.print("z");Serial.print(snap_raw_z);Serial.println(";");
-    Serial.print("t");Serial.print(snap_raw_tacho);Serial.println(";");
+    Serial.print("t");Serial.print(current_rpm);Serial.println(";");
   }
-
-
-
-
 }
 
