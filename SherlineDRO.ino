@@ -1,5 +1,23 @@
 #include "BluetoothSerial.h"
 
+// --- PIN ASSIGNMENTS ---
+#define ENCODER_X_A  16
+#define ENCODER_X_B  17
+#define ENCODER_Y_A  21
+#define ENCODER_Y_B  26
+#define ENCODER_Z_A  18
+#define ENCODER_Z_B  19
+#define ENCODER_TACHO  22
+
+// --- BACKLASH SETTINGS ---
+// Set these to the exact number of physical pulses of "slop" your handwheels have.
+// To disable backlash compensation, set these to 0.
+const int BACKLASH_X_PULSES = 1; 
+const int BACKLASH_Y_PULSES = 1; 
+const int BACKLASH_Z_PULSES = 1;
+
+
+
 
 // --- ENCODER AXIS CLASS ---
 class EncoderAxis {
@@ -19,24 +37,29 @@ public:
     pinMode(pinB, INPUT_PULLUP);
   }
   
+  // Process encoder pulse - called from ISR
+  inline void processPulse(bool current_dir) {
+    // Check for direction change
+    if (current_dir != dir) {
+      dir = current_dir;
+      backlash_counter = 0; // Reset backlash counter on direction change
+    } else if (backlash_counter < backlashPulses) {
+      // Still absorbing backlash, don't update output
+      backlash_counter++;
+    } else {
+      // Backlash absorbed, update output counter
+      if (current_dir)
+        count++;
+      else
+        count--;
+    }
+  }
+  
   long getCount() const { return count; }
 };
 
-// --- PIN ASSIGNMENTS ---
-#define ENCODER_X_A  16
-#define ENCODER_X_B  17
-#define ENCODER_Z_A  18
-#define ENCODER_Z_B  19
-#define ENCODER_TACHO  22
-
-// --- BACKLASH SETTINGS ---
-// Set these to the exact number of physical pulses of "slop" your handwheels have.
-// To disable backlash compensation, set these to 0.
-const int BACKLASH_X_PULSES = 1; 
-const int BACKLASH_Z_PULSES = 1;
-
-// --- ENCODER INSTANCES ---
 EncoderAxis axisX(ENCODER_X_A, ENCODER_X_B, BACKLASH_X_PULSES);
+EncoderAxis axisY(ENCODER_Y_A, ENCODER_Y_B, BACKLASH_Y_PULSES);
 EncoderAxis axisZ(ENCODER_Z_A, ENCODER_Z_B, BACKLASH_Z_PULSES);
 
 BluetoothSerial SerialBT;
@@ -58,42 +81,21 @@ void IRAM_ATTR isrX() {
   bool pinA = digitalRead(axisX.pinA);
   bool pinB = digitalRead(axisX.pinB);
   bool current_dir = (pinA == pinB);
-  
-  // Check for direction change
-  if (current_dir != axisX.dir) {
-    axisX.dir = current_dir;
-    axisX.backlash_counter = 0; // Reset backlash counter on direction change
-  } else if (axisX.backlash_counter < axisX.backlashPulses) {
-    // Still absorbing backlash, don't update output
-    axisX.backlash_counter++;
-  } else {
-    // Backlash absorbed, update output counter
-    if (current_dir)
-      axisX.count++;
-    else
-      axisX.count--;
-  }
+  axisX.processPulse(current_dir);
+}
+
+void IRAM_ATTR isrY() {
+  bool pinA = digitalRead(axisY.pinA);
+  bool pinB = digitalRead(axisY.pinB);
+  bool current_dir = (pinA == pinB);
+  axisY.processPulse(current_dir);
 }
 
 void IRAM_ATTR isrZ() {
   bool pinA = digitalRead(axisZ.pinA);
   bool pinB = digitalRead(axisZ.pinB);
   bool current_dir = (pinA == pinB);
-  
-  // Check for direction change
-  if (current_dir != axisZ.dir) {
-    axisZ.dir = current_dir;
-    axisZ.backlash_counter = 0; // Reset backlash counter on direction change
-  } else if (axisZ.backlash_counter < axisZ.backlashPulses) {
-    // Still absorbing backlash, don't update output
-    axisZ.backlash_counter++;
-  } else {
-    // Backlash absorbed, update output counter
-    if (current_dir)
-      axisZ.count++;
-    else
-      axisZ.count--;
-  }
+  axisZ.processPulse(current_dir);
 }
 
 void IRAM_ATTR isrTacho() {
@@ -107,10 +109,12 @@ void setup() {
   Serial.println("Bluetooth DRO Controller: Sherline_DRO");
   
   axisX.begin();
+  axisY.begin();
   axisZ.begin();
   pinMode(ENCODER_TACHO, INPUT_PULLUP);
   
   attachInterrupt(digitalPinToInterrupt(ENCODER_X_A), isrX, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENCODER_Y_A), isrY, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENCODER_Z_A), isrZ, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENCODER_TACHO), isrTacho, RISING);
 }
@@ -119,6 +123,7 @@ void loop() {
 
   // Get encoder counts (atomic on 32-bit ESP32)
   long snap_out_x = axisX.getCount();
+  long snap_out_y = axisY.getCount();
   long snap_out_z = axisZ.getCount();
   
   // Update RPM calculation at 2Hz (every 500ms)
@@ -149,10 +154,12 @@ void loop() {
     lastSendTime = millis();
     
     SerialBT.print("x");SerialBT.print(snap_out_x);SerialBT.println(";");
+    SerialBT.print("y");SerialBT.print(snap_out_y);SerialBT.println(";");
     SerialBT.print("z");SerialBT.print(snap_out_z);SerialBT.println(";");
     SerialBT.print("t");SerialBT.print(current_rpm);SerialBT.println(";");
     
     Serial.print("x");Serial.print(snap_out_x);Serial.println(";");
+    Serial.print("y");Serial.print(snap_out_y);Serial.println(";");
     Serial.print("z");Serial.print(snap_out_z);Serial.println(";");
     Serial.print("t");Serial.print(current_rpm);Serial.println(";");
   }
