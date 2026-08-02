@@ -1,4 +1,5 @@
 #include "BluetoothSerial.h"
+#include "esp_bt_device.h"
 
 // --- PIN ASSIGNMENTS ---
 #define ENCODER_X_A  16
@@ -12,9 +13,9 @@
 // --- BACKLASH SETTINGS ---
 // Set these to the exact number of physical pulses of "slop" your handwheels have.
 // To disable backlash compensation, set these to 0.
-const int BACKLASH_X_PULSES = 1; 
-const int BACKLASH_Y_PULSES = 1; 
-const int BACKLASH_Z_PULSES = 1;
+const int BACKLASH_X_PULSES = 2;
+const int BACKLASH_Y_PULSES = 1;
+const int BACKLASH_Z_PULSES = 5;
 
 // --- TACHO SETTING ---
 const int PULSES_PER_ROTATION = 6;
@@ -47,7 +48,10 @@ public:
     if (current_dir != dir) {
       dir = current_dir;
       backlash_counter = 0; // Reset backlash counter on direction change
-    } else if (backlash_counter < backlashPulses) {
+    }
+    
+    // Check if we're still absorbing backlash
+    if (backlash_counter < backlashPulses) {
       // Still absorbing backlash, don't update output
       backlash_counter++;
     } else {
@@ -116,6 +120,7 @@ unsigned long lastRpmUpdateTime = 0;
 const unsigned long rpmUpdateInterval = 500; // 500ms = 2Hz RPM update rate
 int current_rpm = 0; // Last calculated RPM value
 
+
 // --- INTERRUPT SERVICE ROUTINES (ISRs) ---
 void IRAM_ATTR isrX() {
   bool pinA = digitalRead(axisX.pinA);
@@ -145,9 +150,8 @@ void IRAM_ATTR isrTacho() {
 void setup() {
   Serial.begin(115200);
   
-  SerialBT.begin("Sherline_DRO"); 
-  Serial.println("Bluetooth DRO Controller: Sherline_DRO");
-  
+  SerialBT.begin("Sherline_DRO");
+
   axisX.begin(isrX);
   axisY.begin(isrY);
   axisZ.begin(isrZ);
@@ -160,6 +164,7 @@ void loop() {
   long snap_out_x = axisX.getCount();
   long snap_out_y = axisY.getCount();
   long snap_out_z = axisZ.getCount();
+  
   
   // Update RPM calculation at 2Hz (every 500ms)
   if (millis() - lastRpmUpdateTime >= rpmUpdateInterval) {
