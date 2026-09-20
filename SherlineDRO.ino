@@ -13,13 +13,12 @@
 // --- BACKLASH SETTINGS ---
 // Set these to the exact number of physical pulses of "slop" your handwheels have.
 // To disable backlash compensation, set these to 0.
-const int BACKLASH_X_PULSES = 2;
+const int BACKLASH_X_PULSES = 3;
 const int BACKLASH_Y_PULSES = 1;
 const int BACKLASH_Z_PULSES = 5;
 
 // --- TACHO SETTING ---
 const int PULSES_PER_ROTATION = 6;
-const int MAX_RPM = 12000; // Safety cap - lathe max around 10k RPM
 
 
 
@@ -71,11 +70,10 @@ class TachoSensor {
 public:
   int pin;
   int pulsesPerRotation;
-  int maxRPM;
   volatile unsigned long pulseCount = 0;
   
-  TachoSensor(int pin, int pulsesPerRotation, int maxRPM)
-    : pin(pin), pulsesPerRotation(pulsesPerRotation), maxRPM(maxRPM) {}
+  TachoSensor(int pin, int pulsesPerRotation)
+    : pin(pin), pulsesPerRotation(pulsesPerRotation) {}
   
   void begin(void (*isr)()) {
     pinMode(pin, INPUT_PULLUP);
@@ -94,12 +92,7 @@ public:
     // Calculate RPM: (pulses * 60 * 1000) / (interval_ms * pulses_per_rotation)
     unsigned long calculated_rpm = (count * 60 * 1000) / (intervalMs * pulsesPerRotation);
     
-    // Apply sanity check - cap at maximum expected RPM
-    if (calculated_rpm <= maxRPM) {
-      return calculated_rpm;
-    } else {
-      return 0; // Invalid reading, probably noise
-    }
+    return calculated_rpm;
   }
 };
 
@@ -109,7 +102,7 @@ EncoderAxis axisY(ENCODER_Y_A, ENCODER_Y_B, BACKLASH_Y_PULSES);
 EncoderAxis axisZ(ENCODER_Z_A, ENCODER_Z_B, BACKLASH_Z_PULSES);
 
 // --- TACHO SENSOR ---
-TachoSensor tacho(ENCODER_TACHO, PULSES_PER_ROTATION, MAX_RPM);
+TachoSensor tacho(ENCODER_TACHO, PULSES_PER_ROTATION);
 
 BluetoothSerial SerialBT;
 
@@ -117,7 +110,7 @@ BluetoothSerial SerialBT;
 unsigned long lastSendTime = 0;
 const unsigned long sendInterval = 40; // 40ms = ~25Hz refresh rate for TouchDRO
 unsigned long lastRpmUpdateTime = 0;
-const unsigned long rpmUpdateInterval = 500; // 500ms = 2Hz RPM update rate
+const unsigned long rpmUpdateInterval = 1130; // 500ms = 2Hz RPM update rate
 int current_rpm = 0; // Last calculated RPM value
 
 
@@ -164,11 +157,13 @@ void loop() {
   long snap_out_x = axisX.getCount();
   long snap_out_y = axisY.getCount();
   long snap_out_z = axisZ.getCount();
+
   
   
   // Update RPM calculation at 2Hz (every 500ms)
-  if (millis() - lastRpmUpdateTime >= rpmUpdateInterval) {
-    current_rpm = tacho.calculateRPM(rpmUpdateInterval);
+  unsigned long since = millis() - lastRpmUpdateTime;
+  if (since >= rpmUpdateInterval) {
+    current_rpm = tacho.calculateRPM(since);
     lastRpmUpdateTime = millis();
   }
 
@@ -185,6 +180,5 @@ void loop() {
     // Serial.print("x");Serial.print(snap_out_x);Serial.println(";");
     // Serial.print("y");Serial.print(snap_out_y);Serial.println(";");
     // Serial.print("z");Serial.print(snap_out_z);Serial.println(";");
-    // Serial.print("t");Serial.print(current_rpm);Serial.println(";");
   }
 }
