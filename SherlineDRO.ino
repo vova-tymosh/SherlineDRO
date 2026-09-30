@@ -1,5 +1,6 @@
 #include "BluetoothSerial.h"
 #include "esp_bt_device.h"
+#include "Tacho.h"
 
 // --- PIN ASSIGNMENTS ---
 #define ENCODER_X_A  16
@@ -8,7 +9,7 @@
 #define ENCODER_Y_B  26
 #define ENCODER_Z_A  18
 #define ENCODER_Z_B  19
-#define ENCODER_TACHO  22
+#define TACHO_RX_PIN  5
 
 // --- BACKLASH SETTINGS ---
 // Set these to the exact number of physical pulses of "slop" your handwheels have.
@@ -16,9 +17,6 @@
 const int BACKLASH_X_PULSES = 3;
 const int BACKLASH_Y_PULSES = 1;
 const int BACKLASH_Z_PULSES = 5;
-
-// --- TACHO SETTING ---
-const int PULSES_PER_ROTATION = 6;
 
 
 
@@ -65,53 +63,19 @@ public:
   long getCount() const { return count; }
 };
 
-// --- TACHO SENSOR CLASS ---
-class TachoSensor {
-public:
-  int pin;
-  int pulsesPerRotation;
-  volatile unsigned long pulseCount = 0;
-  
-  TachoSensor(int pin, int pulsesPerRotation)
-    : pin(pin), pulsesPerRotation(pulsesPerRotation) {}
-  
-  void begin(void (*isr)()) {
-    pinMode(pin, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(pin), isr, RISING);
-  }
-  
-  inline void handlePulse() {
-    pulseCount++;
-  }
-  
-  int calculateRPM(unsigned long intervalMs) {
-    // Read and reset pulse counter
-    unsigned long count = pulseCount;
-    pulseCount = 0;
-    
-    // Calculate RPM: (pulses * 60 * 1000) / (interval_ms * pulses_per_rotation)
-    unsigned long calculated_rpm = (count * 60 * 1000) / (intervalMs * pulsesPerRotation);
-    
-    return calculated_rpm;
-  }
-};
-
 // --- ENCODER INSTANCES ---
 EncoderAxis axisX(ENCODER_X_A, ENCODER_X_B, BACKLASH_X_PULSES);
 EncoderAxis axisY(ENCODER_Y_A, ENCODER_Y_B, BACKLASH_Y_PULSES);
 EncoderAxis axisZ(ENCODER_Z_A, ENCODER_Z_B, BACKLASH_Z_PULSES);
 
-// --- TACHO SENSOR ---
-TachoSensor tacho(ENCODER_TACHO, PULSES_PER_ROTATION);
+// --- TACHO READER ---
+TachoReader tachoReader(TACHO_RX_PIN);
 
 BluetoothSerial SerialBT;
 
 // --- TIMER VARIABLES ---
 unsigned long lastSendTime = 0;
 const unsigned long sendInterval = 40; // 40ms = ~25Hz refresh rate for TouchDRO
-unsigned long lastRpmUpdateTime = 0;
-const unsigned long rpmUpdateInterval = 1130; // 500ms = 2Hz RPM update rate
-int current_rpm = 0; // Last calculated RPM value
 
 
 // --- INTERRUPT SERVICE ROUTINES (ISRs) ---
@@ -136,10 +100,6 @@ void IRAM_ATTR isrZ() {
   axisZ.processPulse(current_dir);
 }
 
-void IRAM_ATTR isrTacho() {
-  tacho.handlePulse();
-}
-
 void setup() {
   Serial.begin(115200);
   
@@ -148,7 +108,7 @@ void setup() {
   axisX.begin(isrX);
   axisY.begin(isrY);
   axisZ.begin(isrZ);
-  tacho.begin(isrTacho);
+  tachoReader.begin();
 }
 
 void loop() {
@@ -158,14 +118,9 @@ void loop() {
   long snap_out_y = axisY.getCount();
   long snap_out_z = axisZ.getCount();
 
-  
-  
-  // Update RPM calculation at 2Hz (every 500ms)
-  unsigned long since = millis() - lastRpmUpdateTime;
-  if (since >= rpmUpdateInterval) {
-    current_rpm = tacho.calculateRPM(since);
-    lastRpmUpdateTime = millis();
-  }
+  // Update tacho reading
+  tachoReader.loop();
+  int current_rpm = tachoReader.getRPM();
 
   // Stream formatted data block to TouchDRO over Bluetooth at 25 Hz
   if (millis() - lastSendTime >= sendInterval) {
@@ -180,5 +135,6 @@ void loop() {
     // Serial.print("x");Serial.print(snap_out_x);Serial.println(";");
     // Serial.print("y");Serial.print(snap_out_y);Serial.println(";");
     // Serial.print("z");Serial.print(snap_out_z);Serial.println(";");
+    // Serial.print("t");Serial.print(current_rpm);Serial.println(";");
   }
 }
