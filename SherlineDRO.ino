@@ -15,9 +15,9 @@
 // --- BACKLASH SETTINGS ---
 // Set these to the exact number of physical pulses of "slop" your handwheels have.
 // To disable backlash compensation, set these to 0.
-const int BACKLASH_X_PULSES = 3;
-const int BACKLASH_Y_PULSES = 1;
-const int BACKLASH_Z_PULSES = 5;
+const int BACKLASH_X_PULSES = 6;
+const int BACKLASH_Y_PULSES = 0;
+const int BACKLASH_Z_PULSES = 10;
 
 // --- DIRECTION SETTINGS ---
 // Flip these if an axis counts the wrong way for the physical layout of the lathe.
@@ -141,6 +141,8 @@ BluetoothSerial SerialBT;
 // --- TIMER VARIABLES ---
 unsigned long lastSendTime = 0;
 const unsigned long sendInterval = 40; // 40ms = ~25Hz refresh rate for TouchDRO
+unsigned long lastDebugTime = 0;
+const unsigned long debugInterval = 100; // 100ms = 10Hz debug output to Serial
 
 
 void setup() {
@@ -178,5 +180,14 @@ void loop() {
     SerialBT.print("y");SerialBT.print(snap_out_y);SerialBT.println(";");
     SerialBT.print("z");SerialBT.print(snap_out_z);SerialBT.println(";");
     SerialBT.print("t");SerialBT.print(current_rpm);SerialBT.println(";");
+  }
+
+  // Debug output to Serial at 10 Hz
+  if (millis() - lastDebugTime >= debugInterval) {
+    lastDebugTime = millis();
+
+    Serial.print("x:");Serial.print(snap_out_x);
+    Serial.print(" y:");Serial.print(snap_out_y);
+    Serial.print(" z:");Serial.println(snap_out_z);
   }
 }
