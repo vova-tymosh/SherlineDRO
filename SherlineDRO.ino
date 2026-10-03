@@ -1,6 +1,7 @@
 #include "BluetoothSerial.h"
 #include "esp_bt_device.h"
 #include "Tacho.h"
+#include "driver/pcnt.h"
 
 // --- PIN ASSIGNMENTS ---
 #define ENCODER_X_A  16
@@ -18,6 +19,12 @@ const int BACKLASH_X_PULSES = 3;
 const int BACKLASH_Y_PULSES = 1;
 const int BACKLASH_Z_PULSES = 5;
 
+// --- DIRECTION SETTINGS ---
+// Flip these if an axis counts the wrong way for the physical layout of the lathe.
+const bool INVERT_X = true;
+const bool INVERT_Y = true;
+const bool INVERT_Z = true;
+
 
 
 // --- ENCODER AXIS CLASS ---
@@ -26,47 +33,105 @@ public:
   int pinA;
   int pinB;
   int backlashPulses;
+  pcnt_unit_t pcntUnit;
+  bool invert;
   volatile bool dir = true;
   volatile int backlash_counter = 0;
+  int16_t lastCount = 0;
   volatile long count = 0;
   
-  EncoderAxis(int pinA, int pinB, int backlashPulses) 
-    : pinA(pinA), pinB(pinB), backlashPulses(backlashPulses) {}
+  EncoderAxis(int pinA, int pinB, int backlashPulses, pcnt_unit_t unit, bool invert = false) 
+    : pinA(pinA), pinB(pinB), backlashPulses(backlashPulses), pcntUnit(unit), invert(invert) {}
   
-  void begin(void (*isr)()) {
-    pinMode(pinA, INPUT_PULLUP);
-    pinMode(pinB, INPUT_PULLUP);
-    attachInterrupt(digitalPinToInterrupt(pinA), isr, CHANGE);
+  void begin() {
+    // X4 quadrature decoding using both PCNT channels of one unit.
+    //
+    // Forward sequence (A,B): 00 -> 10 -> 11 -> 01 -> 00
+    //   ch0: A rising  while B low   -> DEC reversed by lctrl -> +1
+    //        A falling while B high  -> INC kept by hctrl     -> +1
+    //   ch1: B rising  while A high  -> INC kept by hctrl     -> +1
+    //        B falling while A low   -> DEC reversed by lctrl -> +1
+    // All four edges move the counter the same way, so one cycle = 4 counts.
+    pcnt_config_t pcnt_config = {
+      .pulse_gpio_num = pinA,           // Signal A as pulse input
+      .ctrl_gpio_num = pinB,            // Signal B as control
+      .lctrl_mode = PCNT_MODE_REVERSE,  // Invert when B is low
+      .hctrl_mode = PCNT_MODE_KEEP,     // Keep when B is high
+      .pos_mode = PCNT_COUNT_DEC,       // Rising edge of A
+      .neg_mode = PCNT_COUNT_INC,       // Falling edge of A
+      .counter_h_lim = 32767,
+      .counter_l_lim = -32768,
+      .unit = pcntUnit,
+      .channel = PCNT_CHANNEL_0,
+    };
+    pcnt_unit_config(&pcnt_config);
+    
+    // Channel 1: pulse on B, direction from A, base modes swapped vs channel 0
+    pcnt_config.pulse_gpio_num = pinB;
+    pcnt_config.ctrl_gpio_num = pinA;
+    pcnt_config.channel = PCNT_CHANNEL_1;
+    pcnt_config.pos_mode = PCNT_COUNT_INC;   // Rising edge of B
+    pcnt_config.neg_mode = PCNT_COUNT_DEC;   // Falling edge of B
+    pcnt_unit_config(&pcnt_config);
+    
+    // Glitch filter: ignore pulses shorter than 1us (80 APB cycles at 80MHz)
+    pcnt_set_filter_value(pcntUnit, 80);
+    pcnt_filter_enable(pcntUnit);
+    
+    // Let the 16-bit counter wrap instead of being cleared at the limits.
+    // update() tracks int16 deltas, so wraparound is handled correctly and
+    // no counts are lost.
+    pcnt_event_disable(pcntUnit, PCNT_EVT_H_LIM);
+    pcnt_event_disable(pcntUnit, PCNT_EVT_L_LIM);
+    
+    // pcnt_unit_config() routes the GPIOs but does not enable pullups.
+    // The previous interrupt-based code relied on them, so keep them.
+    gpio_pullup_en((gpio_num_t)pinA);
+    gpio_pullup_en((gpio_num_t)pinB);
+    
+    pcnt_counter_pause(pcntUnit);
+    pcnt_counter_clear(pcntUnit);
+    pcnt_counter_resume(pcntUnit);
+    
+    // Seed lastCount so the first update() does not report a bogus delta
+    pcnt_get_counter_value(pcntUnit, &lastCount);
   }
   
-  // Process encoder pulse - called from ISR
-  inline void processPulse(bool current_dir) {
-    // Check for direction change
+  void update() {
+    int16_t pcntCount;
+    pcnt_get_counter_value(pcntUnit, &pcntCount);
+    
+    // Delta since last read. Computed in uint16 then reinterpreted as signed
+    // so the hardware counter wrapping at +-32768 is handled correctly.
+    int16_t delta = (int16_t)((uint16_t)pcntCount - (uint16_t)lastCount);
+    lastCount = pcntCount;
+    
+    if (delta == 0) return;
+    
+    // Direction of this batch, flipped if this axis is inverted so that
+    // backlash compensation tracks the direction the operator actually sees.
+    bool current_dir = invert ? (delta < 0) : (delta > 0);
+    
     if (current_dir != dir) {
       dir = current_dir;
-      backlash_counter = 0; // Reset backlash counter on direction change
+      backlash_counter = 0; // Direction reversed, start absorbing slop again
     }
     
-    // Check if we're still absorbing backlash
-    if (backlash_counter < backlashPulses) {
-      // Still absorbing backlash, don't update output
-      backlash_counter++;
-    } else {
-      // Backlash absorbed, update output counter
-      if (current_dir)
-        count++;
-      else
-        count--;
-    }
+    // Every pulse in the batch moves the same way, so split it in one step:
+    // the first pulses fill the remaining backlash, the rest move the output.
+    int pulses = abs(delta);
+    int absorbed = min(pulses, backlashPulses - backlash_counter);
+    backlash_counter += absorbed;
+    count += current_dir ? (pulses - absorbed) : -(pulses - absorbed);
   }
   
   long getCount() const { return count; }
 };
 
 // --- ENCODER INSTANCES ---
-EncoderAxis axisX(ENCODER_X_A, ENCODER_X_B, BACKLASH_X_PULSES);
-EncoderAxis axisY(ENCODER_Y_A, ENCODER_Y_B, BACKLASH_Y_PULSES);
-EncoderAxis axisZ(ENCODER_Z_A, ENCODER_Z_B, BACKLASH_Z_PULSES);
+EncoderAxis axisX(ENCODER_X_A, ENCODER_X_B, BACKLASH_X_PULSES, PCNT_UNIT_0, INVERT_X);
+EncoderAxis axisY(ENCODER_Y_A, ENCODER_Y_B, BACKLASH_Y_PULSES, PCNT_UNIT_1, INVERT_Y);
+EncoderAxis axisZ(ENCODER_Z_A, ENCODER_Z_B, BACKLASH_Z_PULSES, PCNT_UNIT_2, INVERT_Z);
 
 // --- TACHO READER ---
 TachoReader tachoReader(TACHO_RX_PIN);
@@ -78,42 +143,25 @@ unsigned long lastSendTime = 0;
 const unsigned long sendInterval = 40; // 40ms = ~25Hz refresh rate for TouchDRO
 
 
-// --- INTERRUPT SERVICE ROUTINES (ISRs) ---
-void IRAM_ATTR isrX() {
-  bool pinA = digitalRead(axisX.pinA);
-  bool pinB = digitalRead(axisX.pinB);
-  bool current_dir = (pinA == pinB);
-  axisX.processPulse(current_dir);
-}
-
-void IRAM_ATTR isrY() {
-  bool pinA = digitalRead(axisY.pinA);
-  bool pinB = digitalRead(axisY.pinB);
-  bool current_dir = (pinA == pinB);
-  axisY.processPulse(current_dir);
-}
-
-void IRAM_ATTR isrZ() {
-  bool pinA = digitalRead(axisZ.pinA);
-  bool pinB = digitalRead(axisZ.pinB);
-  bool current_dir = (pinA == pinB);
-  axisZ.processPulse(current_dir);
-}
-
 void setup() {
   Serial.begin(115200);
   
   SerialBT.begin("Sherline_DRO");
 
-  axisX.begin(isrX);
-  axisY.begin(isrY);
-  axisZ.begin(isrZ);
+  axisX.begin();
+  axisY.begin();
+  axisZ.begin();
   tachoReader.begin();
 }
 
 void loop() {
 
-  // Get encoder counts (atomic on 32-bit ESP32)
+  // Update encoder counts from PCNT hardware
+  axisX.update();
+  axisY.update();
+  axisZ.update();
+
+  // Get encoder counts
   long snap_out_x = axisX.getCount();
   long snap_out_y = axisY.getCount();
   long snap_out_z = axisZ.getCount();
@@ -130,11 +178,5 @@ void loop() {
     SerialBT.print("y");SerialBT.print(snap_out_y);SerialBT.println(";");
     SerialBT.print("z");SerialBT.print(snap_out_z);SerialBT.println(";");
     SerialBT.print("t");SerialBT.print(current_rpm);SerialBT.println(";");
-    
-    //Uncomment the following if you want to see the output in Serial Monitor
-    // Serial.print("x");Serial.print(snap_out_x);Serial.println(";");
-    // Serial.print("y");Serial.print(snap_out_y);Serial.println(";");
-    // Serial.print("z");Serial.print(snap_out_z);Serial.println(";");
-    // Serial.print("t");Serial.print(current_rpm);Serial.println(";");
   }
 }
