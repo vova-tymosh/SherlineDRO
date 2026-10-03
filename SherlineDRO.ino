@@ -35,8 +35,10 @@ public:
   int backlashPulses;
   pcnt_unit_t pcntUnit;
   bool invert;
-  volatile bool dir = true;
-  volatile int backlash_counter = 0;
+  // Position of the handwheel within the backlash gap, 0..backlashPulses.
+  // 0 = fully engaged in the reverse direction, backlashPulses = fully
+  // engaged forward. Anything between means we are coasting in the slop.
+  int backlash_slop = 0;
   int16_t lastCount = 0;
   volatile long count = 0;
   
@@ -108,21 +110,24 @@ public:
     
     if (delta == 0) return;
     
-    // Direction of this batch, flipped if this axis is inverted so that
-    // backlash compensation tracks the direction the operator actually sees.
-    bool current_dir = invert ? (delta < 0) : (delta > 0);
+    // Movement in the direction the operator sees.
+    int moved = invert ? -delta : delta;
     
-    if (current_dir != dir) {
-      dir = current_dir;
-      backlash_counter = 0; // Direction reversed, start absorbing slop again
-    }
+    // Travel first takes up whatever slop is left on this side of the gap;
+    // only the remainder past the gap edge actually moves the table.
+    //
+    // backlash_slop holds the absolute position inside the gap rather than a
+    // count since the last reversal, so a partial reversal leaves the axis
+    // partway through the slop and a reversal back out of it costs only what
+    // was actually given up. Resetting on every direction change instead
+    // re-absorbed the full backlash and lost those counts.
+    int slop = backlash_slop + moved;
+    backlash_slop = constrain(slop, 0, backlashPulses);
     
-    // Every pulse in the batch moves the same way, so split it in one step:
-    // the first pulses fill the remaining backlash, the rest move the output.
-    int pulses = abs(delta);
-    int absorbed = min(pulses, backlashPulses - backlash_counter);
-    backlash_counter += absorbed;
-    count += current_dir ? (pulses - absorbed) : -(pulses - absorbed);
+    if (slop > backlashPulses)
+      count += slop - backlashPulses;  // pushed out the forward edge
+    else if (slop < 0)
+      count += slop;                   // pushed out the reverse edge
   }
   
   long getCount() const { return count; }
